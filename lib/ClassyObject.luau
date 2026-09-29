@@ -385,6 +385,8 @@ function Classy.Destroy<T>(self: Classy<T>)
 	end
 
 	self.Janitor:Destroy()
+	self.InstanceAdded:Destroy()
+	self.InstanceRevoked:Destroy()
 
 	table.clear(self :: any)
 	setmetatable(self :: any, nil)
