@@ -45,7 +45,7 @@ export type Applied<T> = typeof(setmetatable(
 ]=]
 function Applied.new<T>(Inst: Instance, ClassyObject: Classy<T>, Metadata: { [string]: any }?): Applied<T>
 	local AppliedJanitor = Janitor.new()
-	ClassyObject.Janitor:Add(AppliedJanitor)
+	ClassyObject.Janitor:Add(AppliedJanitor, "Destroy", Inst)
 
 	local Data: T
 	
@@ -97,6 +97,7 @@ end
 ]=]
 function Applied.Destroy<T>(self: Applied<T>)
 	Util.SafeCall(self.Data, self.Classy.NamingConvention.Destroy, self.Data)
+	self.Classy.Janitor:RemoveNoClean(self.Instance)
 	self.Janitor:Destroy()
 
 	if self.Classy.Nuke then
