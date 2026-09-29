@@ -37,8 +37,7 @@ function Alias.ResolveClassyForTag(Tag: string, Metadata: { [string]: any }?): a
 		return nil
 	end
 
-	local AliasContext = {}
-	AliasContext = table.clone(BaseClassy.Context)
+	local AliasContext = table.clone(BaseClassy.Context)
 	AliasContext.tag = Tag
 
 	local AliasClassy = ClassyObject.ClassyObject.new(Tag, BaseClassy.Constructable, BaseClassy.ConstructorKind, {
@@ -48,6 +47,7 @@ function Alias.ResolveClassyForTag(Tag: string, Metadata: { [string]: any }?): a
 			Init = BaseClassy.NamingConvention.Init,
 			Destroy = BaseClassy.NamingConvention.Destroy,
 		},
+		Nuke = BaseClassy.Nuke,
 		Context = AliasContext,
 		RemoveTagOnCleanup = BaseClassy.RemoveTagOnCleanup,
 		Logging = BaseClassy.Logging,

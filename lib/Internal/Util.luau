@@ -33,23 +33,19 @@ function Util.SafeDestroy<T>(Data: T)
 end
 
 function Util.WaitForMetadata(Inst: Instance, Tag: string, Timeout: number)
-	local ATTRIBUTE = `__{string.lower(Tag)}.._metadata`
+	local Attribute = `_{string.lower(Tag)}_metadata`
+	local StartTime = os.clock()
 
-	if not Inst:GetAttribute(ATTRIBUTE) then
-		local Changed = Inst:GetAttributeChangedSignal(ATTRIBUTE)
-		local StartTime = os.clock()
-
-		while os.clock() - StartTime < Timeout do
-			Changed:Wait()
-			if Inst:GetAttribute(ATTRIBUTE) then
-				break
-			end
-		end
+	while not Inst:GetAttribute(Attribute) and os.clock() - StartTime < Timeout do
+		task.wait()
 	end
 
-	local Raw = Inst:GetAttribute(ATTRIBUTE)
-	if Raw then
-		return HttpService:JSONDecode(Raw :: any)
+	local Raw = Inst:GetAttribute(Attribute)
+	if typeof(Raw) == "string" then
+		local Success, Decoded = pcall(HttpService.JSONDecode, HttpService, Raw)
+		if Success then
+			return Decoded
+		end
 	end
 
 	return nil
