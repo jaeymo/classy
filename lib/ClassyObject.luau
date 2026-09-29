@@ -32,6 +32,7 @@ export type Applied<T> = typeof(setmetatable(
 		Janitor: Janitor,
 		Data: T,
 		Triggers: { [string]: string }?,
+		AncestryConnection: RBXScriptConnection?,
 	},
 	Applied
 	))
@@ -40,7 +41,6 @@ export type Applied<T> = typeof(setmetatable(
 	Instantiates a new Applied object.
     @param Instance Instance
     @param ClassyObject Classy<T>
-    @param ... any?
 	@return Applied<T>
 ]=]
 function Applied.new<T>(Inst: Instance, ClassyObject: Classy<T>, Metadata: { [string]: any }?): Applied<T>
@@ -75,6 +75,7 @@ function Applied.new<T>(Inst: Instance, ClassyObject: Classy<T>, Metadata: { [st
 		Instance = Inst,
 		Data = Data,
 		Triggers = Metadata and (Metadata.triggers or Metadata.Triggers),
+		AncestryConnection = nil :: RBXScriptConnection?
 	}, Applied)
 end
 
@@ -96,6 +97,10 @@ end
 	:::
 ]=]
 function Applied.Destroy<T>(self: Applied<T>)
+	if self.AncestryConnection then
+		self.AncestryConnection:Disconnect()
+	end
+
 	Util.SafeCall(self.Data, self.Classy.NamingConvention.Destroy, self.Data)
 	self.Classy.Janitor:RemoveNoClean(self.Instance)
 	self.Janitor:Destroy()
@@ -184,19 +189,17 @@ end
 	Initializes a Classy object
 ]=]
 function Classy.Init<T>(self: Classy<T>)
-	for _, Inst in CollectionService:GetTagged(self.Tag) do
+	local function TryApply(Inst: Instance)
 		if self:CanBeApplied(Inst) then
-			local Metadata = self.WaitForMetadata and Util.WaitForMetadata(Inst, self.Tag, METADATA_TIMEOUT) or nil
-			self:Apply(Inst, Metadata)
+			self:Apply(Inst)
 		end
 	end
 
-	self.Janitor:Add(CollectionService:GetInstanceAddedSignal(self.Tag):Connect(function(Inst: Instance)
-		if self:CanBeApplied(Inst) then
-			local Metadata = self.WaitForMetadata and Util.WaitForMetadata(Inst, self.Tag, METADATA_TIMEOUT) or nil
-			self:Apply(Inst, Metadata)
-		end
-	end))
+	for _, Inst in CollectionService:GetTagged(self.Tag) do
+		task.spawn(TryApply, Inst)
+	end
+
+	self.Janitor:Add(CollectionService:GetInstanceAddedSignal(self.Tag):Connect(TryApply))
 
 	self.Janitor:Add(CollectionService:GetInstanceRemovedSignal(self.Tag):Connect(function(Inst: Instance)
 		self:Revoke(Inst)
@@ -277,13 +280,11 @@ function Classy.Apply<T>(self: Classy<T>, Inst: Instance, Metadata: { [string]: 
 	Registry.InstanceRegistry[Inst] = Registry.InstanceRegistry[Inst] or {}
 	Registry.InstanceRegistry[Inst][self.Tag] = AppliedObject
 
-	local Connection: RBXScriptConnection
-	Connection = Inst.AncestryChanged:Connect(function()
-		if not self:CanBeApplied(Inst) then
-			self:Revoke(Inst)
-			Connection:Disconnect()
-		end
-	end)
+	AppliedObject.AncestryConnection = Inst.AncestryChanged:Connect(function()
+	if not self:CanBeApplied(Inst) then
+		self:Revoke(Inst)
+	end
+end)
 
 	self.InstanceAdded:Fire(Inst, AppliedObject)
 	
@@ -388,6 +389,10 @@ function Classy.Destroy<T>(self: Classy<T>)
 	self.Janitor:Destroy()
 	self.InstanceAdded:Destroy()
 	self.InstanceRevoked:Destroy()
+
+	if Registry.GlobalRegistry[self.Tag] == self then
+		Registry.GlobalRegistry[self.Tag] = nil
+	end
 
 	table.clear(self :: any)
 	setmetatable(self :: any, nil)

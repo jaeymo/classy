@@ -95,8 +95,10 @@ function Classy.applyComponents(Inst: Instance, Components: { [string]: { [strin
 			continue
 		end
 
-		Inst:AddTag(Tag)
 		ClassyInstance:Apply(Inst, Metadata)
+
+		-- Run this after `ClassyInstance:Apply()` because under the "Immediate" signal behavior, we would have a race condition
+		Inst:AddTag(Tag)
 	end
 end
 
