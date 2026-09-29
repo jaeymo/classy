@@ -13,7 +13,7 @@ Make composition **and** OOP architecture feel good in Roblox.
 </p>
 
 <p>
-  <img alt="Version" src="https://img.shields.io/badge/version-2.1.2-blue?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-2.1.3-blue?style=flat-square">
   <a href="https://github.com/jaeymo/classy/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/jaeymo/classy?style=flat-square&color=gold"></a>
   <a href="https://github.com/jaeymo/classy/issues"><img alt="Issues" src="https://img.shields.io/github/issues/jaeymo/classy?style=flat-square"></a>
   <a href="https://github.com/jaeymo/classy/commits/main"><img alt="Last commit" src="https://img.shields.io/github/last-commit/jaeymo/classy?style=flat-square"></a>
@@ -78,7 +78,7 @@ Add Classy to your `wally.toml`:
 
 ```toml
 [dependencies]
-Classy = "jaeymo/classy@2.1.2"
+Classy = "jaeymo/classy@2.1.3"
 ```
 
 Then run:
@@ -87,7 +87,7 @@ Then run:
 wally install
 ```
 
-Or grab it from the [Wally package page](https://wally.run/package/jaeymo/classy?version=2.1.2).
+Or grab it from the [Wally package page](https://wally.run/package/jaeymo/classy?version=2.1.3).
 
 </details>
 
