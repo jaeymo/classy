@@ -19,11 +19,53 @@ type Janitor = Types.Janitor
 local METADATA_TIMEOUT = 7
 
 --[=[
-	@class Applied
-	The Applied class is what Classy manages and attaches instances to
+	@class AppliedObject
+
+	The wrapper Classy keeps for each tagged instance. It holds whatever your
+	constructor produced, the [Janitor](https://github.com/howmanysmall/Janitor)
+	handed to it, and a reference back to the owning [ClassyObject].
+
+	You normally get one from [ClassyObject:GetApplied], [ClassyObject:ObserveApplied],
+	or [Classy.getComponent].
 ]=]
 local Applied = {}
 Applied.__index = Applied
+
+--[=[
+	@prop Classy ClassyObject<T>
+	@within AppliedObject
+
+	The [ClassyObject] that owns this applied object.
+]=]
+
+--[=[
+	@prop Instance Instance
+	@within AppliedObject
+
+	The instance this object is attached to.
+]=]
+
+--[=[
+	@prop Janitor Janitor
+	@within AppliedObject
+
+	The Janitor handed to your constructor. Cleaned up when the instance is revoked.
+]=]
+
+--[=[
+	@prop Data T
+	@within AppliedObject
+
+	What your constructor or class produced. Same as [AppliedObject:GetData].
+]=]
+
+--[=[
+	@prop Triggers { [string]: string }?
+	@within AppliedObject
+
+	The trigger map from the object's metadata, if any. Maps a trigger name to a
+	method name. See [Classy.emit].
+]=]
 
 export type Applied<T> = typeof(setmetatable(
 	{} :: {
@@ -38,10 +80,21 @@ export type Applied<T> = typeof(setmetatable(
 	))
 
 --[=[
-	Instantiates a new Applied object.
-    @param Instance Instance
-    @param ClassyObject Classy<T>
-	@return Applied<T>
+	Instantiates a new AppliedObject, builds its data through the Classy's
+	constructor, and runs the object's `Init` method (if it has one).
+
+	:::caution
+	`Init` runs *before* the object is registered, so inside `Init` the object
+	can't yet be found with [Classy.getComponent] or [ClassyObject:GetApplied].
+	Use [ClassyObject:ObserveApplied] for that.
+	:::
+
+	@within AppliedObject
+	@private
+	@param Inst Instance
+	@param ClassyObject ClassyObject<T>
+	@param Metadata { [string]: any }?
+	@return AppliedObject<T>
 ]=]
 function Applied.new<T>(Inst: Instance, ClassyObject: Classy<T>, Metadata: { [string]: any }?): Applied<T>
 	local AppliedJanitor = Janitor.new()
@@ -80,21 +133,34 @@ function Applied.new<T>(Inst: Instance, ClassyObject: Classy<T>, Metadata: { [st
 end
 
 --[=[
+	Returns the `T` of an AppliedObject: either the custom value returned from a
+	function constructable, or the object built by a class constructable.
+
+```lua
+	local applied = KillPartClassy:GetApplied(workspace.Lava)
+	applied:GetData():DoSomething()
+```
+
+	@within AppliedObject
 	@return T
-	Returns the T of an Applied object, either referring to a custom
-    return from a function constructable or a object from a class
 ]=]
 function Applied.GetData<T>(self: Applied<T>): T
 	return self.Data
 end
 
 --[=[
-	Destroys the Janitor and the attached data of an Applied object
+	Runs your `Destroy` method, destroys the Janitor, and clears the attached
+	data of an AppliedObject.
+
+	Prefer [ClassyObject:Revoke] over calling this yourself, since `Revoke` also
+	handles the registry, the tag, and the `InstanceRevoked` signal.
 
 	:::warning Metatable Removal
-	Running this will make any further attempts to call a method of Applied
-	error
+	Running this will make any further attempts to call a method of AppliedObject
+	error.
 	:::
+
+	@within AppliedObject
 ]=]
 function Applied.Destroy<T>(self: Applied<T>)
 	if self.AncestryConnection then
@@ -113,14 +179,58 @@ function Applied.Destroy<T>(self: Applied<T>)
 	setmetatable(self :: any, nil)
 end
 
-
 --[=[
-	@class Classy
-	A Classy is useful for instantiating and managing instances of
-	based on tags
+	@class ClassyObject
+
+	What [Classy.new] and [Classy.newClass] return. A ClassyObject manages every
+	instance that carries its tag: it applies them, tracks them, and cleans them
+	up when they're revoked.
+
+```lua
+	local DoorClassy = Classy.newClass("Door", DoorClass, {
+		ClassNames = { "Model" },
+		Ancestors = { workspace.Doors },
+	})
+
+	DoorClassy:Init()
+
+	DoorClassy:ObserveApplied(function(instance, applied)
+		applied:GetData():Open()
+	end)
+```
 ]=]
 local Classy = {}
 Classy.__index = Classy
+
+--[=[
+	@prop InstanceAdded Signal<Instance, AppliedObject<T>>
+	@within ClassyObject
+
+	Fires when an instance is applied. Only fires for instances applied from now
+	on. Use [ClassyObject:ObserveApplied] to also cover existing ones.
+]=]
+
+--[=[
+	@prop InstanceRevoked Signal<Instance>
+	@within ClassyObject
+
+	Fires after an instance is revoked.
+]=]
+
+--[=[
+	@prop Tag string
+	@within ClassyObject
+
+	The CollectionService tag this ClassyObject manages.
+]=]
+
+--[=[
+	@prop Applied { [Instance]: AppliedObject<T> }
+	@within ClassyObject
+
+	Internal lookup of applied objects. Prefer [ClassyObject:GetApplied] and
+	[ClassyObject:GetAll].
+]=]
 
 export type Classy<T> = typeof(setmetatable(
 	{} :: {
@@ -148,11 +258,16 @@ export type Classy<T> = typeof(setmetatable(
 	))
 
 --[=[
-	Instantiates a new Classy object
-    @param Tag string
-    @param Constructable Constructable<T>
-    @param ClassyConfig ClassyConfig<U>
-	@return Classy<T>
+	Instantiates a new ClassyObject. Use [Classy.new] or [Classy.newClass] instead
+	of calling this directly.
+
+	@within ClassyObject
+	@private
+	@param Tag string
+	@param Constructable any
+	@param ConstructorKind ConstructorKind
+	@param ClassyConfig ClassyConfig?
+	@return ClassyObject<T>
 ]=]
 function Classy.new<T>(Tag: string, Constructable: any, ConstructorKind: ConstructorKind, ClassyConfig: ClassyConfig?): Classy<T>
 	local Config: ClassyConfig = ClassyConfig or {} :: any
@@ -186,7 +301,15 @@ function Classy.new<T>(Tag: string, Constructable: any, ConstructorKind: Constru
 end
 
 --[=[
-	Initializes a Classy object
+	Initializes the ClassyObject. Applies every currently tagged instance that
+	passes the checks, then starts listening for newly tagged and untagged
+	instances. Call this once.
+
+```lua
+	KillPartClassy:Init()
+```
+
+	@within ClassyObject
 ]=]
 function Classy.Init<T>(self: Classy<T>)
 	local function TryApply(Inst: Instance)
@@ -207,9 +330,12 @@ function Classy.Init<T>(self: Classy<T>)
 end
 
 --[=[
-	Returns if an Instance passes all of the checks to be applied
-    @param Instance Instance
-    @return boolean
+	Returns whether an instance passes all of the checks to be applied:
+	`ClassNames`, `Ancestors`, and `Predicate`.
+
+	@within ClassyObject
+	@param Instance Instance
+	@return boolean
 ]=]
 function Classy.CanBeApplied<T>(self: Classy<T>, Instance: Instance): boolean
 	if not Util.Validate(Instance, self.ClassNames, "IsA") then
@@ -228,33 +354,45 @@ function Classy.CanBeApplied<T>(self: Classy<T>, Instance: Instance): boolean
 end
 
 --[=[
-	Returns if an Instance passes all of the checks to be applied
-    @param Instance Instance
-    @return boolean
+	Returns the applied object for an instance, if it has one.
+
+	@within ClassyObject
+	@param Instance Instance
+	@return AppliedObject<T>?
 ]=]
 function Classy.GetApplied<T>(self: Classy<T>, Instance: Instance): Applied<T>
 	return self.Applied[Instance]
 end
 
 --[=[
-	Returns all applied instances
-    @return { [Instance]: Applied<T> }
+	Returns every applied object, keyed by instance.
+
+	@within ClassyObject
+	@return { [Instance]: AppliedObject<T> }
 ]=]
 function Classy.GetAll<T>(self: Classy<T>): { [Instance]: Applied<T> }
 	return self.Applied
 end
 
 --[=[
-	Bypasses the `CanBeApplied` check and applies an instance
-    
-    ```lua
-    local AppliedObject = ClassyObject:Apply(SomeInstance)
-    AppliedObject:GetData():DoSomething()
-    ```
+	Bypasses the [ClassyObject:CanBeApplied] check and applies an instance.
+	If the instance is already applied, the existing object is returned.
 
-    @param Instance Instance
-    @param Metadata: {[string]: any}?
-    @return Applied<T>
+	If `Metadata` is given, it's passed to your constructor as its fourth
+	argument and saved on the instance as a JSON attribute named
+	`_<lowercase tag>_metadata`. With `WaitForMetadata = true` and no metadata
+	passed, this waits up to 7 seconds for that attribute to exist.
+
+```lua
+	local AppliedObject = ClassyObject:Apply(SomeInstance)
+	AppliedObject:GetData():DoSomething()
+```
+
+	@within ClassyObject
+	@yields
+	@param Inst Instance
+	@param Metadata { [string]: any }? -- Must be JSON-serializable
+	@return AppliedObject<T>
 ]=]
 function Classy.Apply<T>(self: Classy<T>, Inst: Instance, Metadata: { [string]: any }?): Applied<T>
 	if self.WaitForMetadata and not Metadata then
@@ -292,22 +430,26 @@ end)
 end
 
 --[=[
-	Revokes an Instance from Classy
-    
-    :::info Note
-	This will nullify the object's metatable, so you will not be able to use it's
-	object after revoking it from Classy
+	Revokes an instance from Classy. Destroys its applied object, removes it from
+	the registry, removes the tag (unless `RemoveTagOnCleanup` is `false`), and
+	fires `InstanceRevoked`.
+
+	:::info Note
+	This will nullify the object's metatable, so you will not be able to use its
+	object after revoking it from Classy.
 	:::
 
-    ```lua
-    if ClassyObject:GetApplied(SomeInstance) then
-        ClassyObject:Revoke(SomeInstance)
-    end
-    ```
+```lua
+	if ClassyObject:GetApplied(SomeInstance) then
+		ClassyObject:Revoke(SomeInstance)
+	end
+```
 
-    @param Instance Instance
+	@within ClassyObject
+	@param Inst Instance
 ]=]
 function Classy.Revoke<T>(self: Classy<T>, Inst: Instance)
+	
 	local AppliedObject = self:GetApplied(Inst)
 	if not AppliedObject then
 		return
@@ -338,18 +480,21 @@ function Classy.Revoke<T>(self: Classy<T>, Inst: Instance)
 end
 
 --[=[
-	Runs a callback for all applied objects and hooks into the `InstanceAdded` signal
+	Runs a callback for every already-applied object, and hooks into the
+	`InstanceAdded` signal so it also runs for every future one.
 
-    ```lua
-    local Connection = ClassyObject:ObserveApplied(function(Instance, Applied)
-        Applied:GetData():DoSomething()
-    end)
+```lua
+	local Connection = ClassyObject:ObserveApplied(function(Instance, Applied)
+		Applied:GetData():DoSomething()
+	end)
 
-    Connection:Disconnect()
-    ```
+	-- Later
+	Connection:Disconnect()
+```
 
-    @param Callback (Instance: Instance, Applied: Applied<T>)
-    @return Connection Connection
+	@within ClassyObject
+	@param Callback (Instance: Instance, Applied: AppliedObject<T>) -> ()
+	@return Connection
 ]=]
 function Classy.ObserveApplied<T>(
 	self: Classy<T>,
@@ -365,17 +510,20 @@ function Classy.ObserveApplied<T>(
 end
 
 --[=[
-	Destroys all tracked objects, cleans the Janitor and destroys signals, rendering
-    this object unusable.
+	Destroys all tracked objects, cleans the Janitor, and destroys the signals,
+	rendering this object unusable. Also clears its global registration if it was
+	registered under its tag.
 
 	:::warning Metatable Removal
-	Running this will make any further attempts to call a method of Classy
+	Running this will make any further attempts to call a method of ClassyObject
 	error.
 	:::
 
-	```lua
+```lua
 	ClassyObject:Destroy()
-	```
+```
+
+	@within ClassyObject
 ]=]
 function Classy.Destroy<T>(self: Classy<T>)
 	for Inst in self:GetAll() do
