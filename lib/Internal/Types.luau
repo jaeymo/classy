@@ -113,6 +113,7 @@ export type ClassyConfig = {
 		Init: string?,
 		Destroy: string?,
 	}?,
+	AutoInit: boolean?,
 	Nuke: boolean?,
 	Context: any?,
 	RemoveTagOnCleanup: boolean?,

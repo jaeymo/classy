@@ -31,11 +31,23 @@ local METADATA_TIMEOUT = 7
 local Applied = {}
 Applied.__index = Applied
 
+type PendingApply = {
+	Waiting: {thread},
+	Cancelled: boolean,
+}
+
 --[=[
 	@prop Classy ClassyObject<T>
 	@within AppliedObject
 
 	The [ClassyObject] that owns this applied object.
+]=]
+
+--[=[
+	@prop Initialized boolean
+	@within AppliedObject
+
+	True once `Init` has finished. Always true when `AutoInit` is false.	
 ]=]
 
 --[=[
@@ -73,6 +85,7 @@ export type Applied<T> = typeof(setmetatable(
 		Instance: Instance,
 		Janitor: Janitor,
 		Data: T,
+		Initialized: boolean,
 		Triggers: { [string]: string }?,
 		AncestryConnection: RBXScriptConnection?,
 	},
@@ -119,14 +132,13 @@ function Applied.new<T>(Inst: Instance, ClassyObject: Classy<T>, Metadata: { [st
 			ClassyObject.Context
 		)
 	end
-	
-	Util.SafeCall(Data, ClassyObject.NamingConvention.Init, Data)
 
 	return setmetatable({
 		Janitor = AppliedJanitor,
 		Classy = ClassyObject,
 		Instance = Inst,
 		Data = Data,
+		Initialized = false,
 		Triggers = Metadata and (Metadata.triggers or Metadata.Triggers),
 		AncestryConnection = nil :: RBXScriptConnection?
 	}, Applied)
@@ -244,6 +256,7 @@ export type Classy<T> = typeof(setmetatable(
 			Init: string,
 			Destroy: string,
 		},
+		AutoInit: boolean,
 		WaitForMetadata: boolean,
 		Context: { any },
 		RemoveTagOnCleanup: boolean,
@@ -251,6 +264,7 @@ export type Classy<T> = typeof(setmetatable(
 		ConstructorKind: Types.ConstructorKind,
 		Predicate: ((Instance) -> boolean)?,
 		Applied: { [Instance]: Applied<T> },
+		Pending: {[Instance]: PendingApply},
 		InstanceAdded: Types.Signal<Instance, Applied<T>>,
 		InstanceRevoked: Types.Signal<Instance>,
 	},
@@ -283,6 +297,7 @@ function Classy.new<T>(Tag: string, Constructable: any, ConstructorKind: Constru
 		Predicate = Config.Predicate,
 		RemoveTagOnCleanup = if Config.RemoveTagOnCleanup ~= nil then Config.RemoveTagOnCleanup else true,
 		Nuke = if Config.Nuke ~= nil then Config.Nuke else true,
+		AutoInit = if Config.AutoInit ~= nil then Config.AutoInit else true,
 
 		NamingConvention = {
 			Init = Config.NamingConvention and Config.NamingConvention.Init or "Init",
@@ -293,8 +308,9 @@ function Classy.new<T>(Tag: string, Constructable: any, ConstructorKind: Constru
 		Context = Config.Context or {},
 
 		Applied = {},
+		Pending = {},
 		Janitor = Janitor.new(),
-
+		
 		InstanceAdded = Signal.new(),
 		InstanceRevoked = Signal.new(),
 	}, Classy)
@@ -360,7 +376,7 @@ end
 	@param Instance Instance
 	@return AppliedObject<T>?
 ]=]
-function Classy.GetApplied<T>(self: Classy<T>, Instance: Instance): Applied<T>
+function Classy.GetApplied<T>(self: Classy<T>, Instance: Instance): Applied<T>?
 	return self.Applied[Instance]
 end
 
@@ -394,38 +410,89 @@ end
 	@param Metadata { [string]: any }? -- Must be JSON-serializable
 	@return AppliedObject<T>
 ]=]
-function Classy.Apply<T>(self: Classy<T>, Inst: Instance, Metadata: { [string]: any }?): Applied<T>
+function Classy.Apply<T>(self: Classy<T>, Inst: Instance, Metadata: { [string]: any }?): Applied<T>?
 	if self.WaitForMetadata and not Metadata then
 		Metadata = Util.WaitForMetadata(Inst, self.Tag, METADATA_TIMEOUT)
 	end
 
-	if Metadata then
-		Inst:SetAttribute(`_{string.lower(self.Tag)}_metadata`, HttpService:JSONEncode(Metadata))
-	end
-
-	local Existing = self:GetApplied(Inst)
+	local Existing = self.Applied[Inst]
 	if Existing then
 		return Existing
+	end
+
+	local InFlight = self.Pending[Inst]
+	if InFlight then
+		table.insert(InFlight.Waiting, coroutine.running())
+		coroutine.yield()
+		return self.Applied[Inst] -- nil if the apply was cancelled or failed
+	end
+
+	local PendingMap = self.Pending
+	local Pending: PendingApply = { Waiting = {}, Cancelled = false }
+	PendingMap[Inst] = Pending
+
+	if Metadata then
+		Inst:SetAttribute(`_{string.lower(self.Tag)}_metadata`, HttpService:JSONEncode(Metadata))
 	end
 
 	if self.Logging then
 		print(`[Classy] Applied instance: {Inst:GetFullName()}`)
 	end
 
-	local AppliedObject = Applied.new(Inst, self, Metadata)
+	local Success, Result = pcall(Applied.new, Inst, self, Metadata)
+	PendingMap[Inst] = nil
+
+	local function WakeWaiters()
+		for _, Thread in Pending.Waiting do
+			task.spawn(Thread)
+		end
+	end
+
+	if not Success then
+		self.Janitor:Remove(Inst) -- Applied.new already added the janitor before it threw
+		WakeWaiters()
+		error(Result, 0)
+	end
+
+	local AppliedObject = Result :: Applied<T>
+
+	if Pending.Cancelled then
+		-- Revoked while the constructor was yielding
+		AppliedObject:Destroy()
+		WakeWaiters()
+		return nil
+	end
+
 	self.Applied[Inst] = AppliedObject
 
 	Registry.InstanceRegistry[Inst] = Registry.InstanceRegistry[Inst] or {}
 	Registry.InstanceRegistry[Inst][self.Tag] = AppliedObject
 
 	AppliedObject.AncestryConnection = Inst.AncestryChanged:Connect(function()
-	if not self:CanBeApplied(Inst) then
-		self:Revoke(Inst)
-	end
-end)
+		if not self:CanBeApplied(Inst) then
+			self:Revoke(Inst)
+		end
+	end)
 
+	WakeWaiters()
+
+	if self.AutoInit then
+		local InitSuccess, InitError = (xpcall::any)(Util.SafeCall, debug.traceback, AppliedObject.Data, self.NamingConvention.Init, AppliedObject.Data)
+
+		-- init may have yielded and the object may have been revoked meanwhile
+		if self.Applied[Inst] ~= AppliedObject then
+			return nil
+		end
+
+		if not InitSuccess then
+			self:Revoke(Inst)
+			error(`[Classy] Init failed for "{self.Tag}" on {Inst:GetFullName()}:\n{InitError}`, 0)
+		end
+	end
+
+	AppliedObject.Initialized = true
 	self.InstanceAdded:Fire(Inst, AppliedObject)
-	
+
 	return AppliedObject
 end
 
@@ -449,7 +516,12 @@ end
 	@param Inst Instance
 ]=]
 function Classy.Revoke<T>(self: Classy<T>, Inst: Instance)
-	
+	local InFlight = self.Pending[Inst]
+	if InFlight then
+		InFlight.Cancelled = true
+		return
+	end
+
 	local AppliedObject = self:GetApplied(Inst)
 	if not AppliedObject then
 		return
@@ -501,6 +573,12 @@ function Classy.ObserveApplied<T>(
 	Callback: (Instance: Instance, Applied: Applied<T>) -> ()
 ): Types.Connection
 	for Inst, AppliedObject in self:GetAll() do
+		
+		-- will arrive later through InstanceAdded
+		if not AppliedObject.Initialized then
+			continue	
+		end
+
 		task.spawn(function()
 			Callback(Inst, AppliedObject :: Applied<T>)
 		end)
