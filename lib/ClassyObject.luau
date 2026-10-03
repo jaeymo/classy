@@ -31,11 +31,23 @@ local METADATA_TIMEOUT = 7
 local Applied = {}
 Applied.__index = Applied
 
+type PendingApply = {
+	Waiting: {thread},
+	Cancelled: boolean,
+}
+
 --[=[
 	@prop Classy ClassyObject<T>
 	@within AppliedObject
 
 	The [ClassyObject] that owns this applied object.
+]=]
+
+--[=[
+	@prop Initialized boolean
+	@within AppliedObject
+
+	True once `Init` has finished. Always true when `AutoInit` is false.	
 ]=]
 
 --[=[
@@ -73,6 +85,7 @@ export type Applied<T> = typeof(setmetatable(
 		Instance: Instance,
 		Janitor: Janitor,
 		Data: T,
+		Initialized: boolean,
 		Triggers: { [string]: string }?,
 		AncestryConnection: RBXScriptConnection?,
 	},
@@ -80,14 +93,9 @@ export type Applied<T> = typeof(setmetatable(
 	))
 
 --[=[
-	Instantiates a new AppliedObject, builds its data through the Classy's
-	constructor, and runs the object's `Init` method (if it has one).
-
-	:::caution
-	`Init` runs *before* the object is registered, so inside `Init` the object
-	can't yet be found with [Classy.getComponent] or [ClassyObject:GetApplied].
-	Use [ClassyObject:ObserveApplied] for that.
-	:::
+	Instantiates a new AppliedObject and builds its data through the Classy's
+	constructor. This doesn't register the object or run `Init`;
+	[ClassyObject:Apply] does both once the constructor returns.
 
 	@within AppliedObject
 	@private
@@ -119,14 +127,13 @@ function Applied.new<T>(Inst: Instance, ClassyObject: Classy<T>, Metadata: { [st
 			ClassyObject.Context
 		)
 	end
-	
-	Util.SafeCall(Data, ClassyObject.NamingConvention.Init, Data)
 
 	return setmetatable({
 		Janitor = AppliedJanitor,
 		Classy = ClassyObject,
 		Instance = Inst,
 		Data = Data,
+		Initialized = false,
 		Triggers = Metadata and (Metadata.triggers or Metadata.Triggers),
 		AncestryConnection = nil :: RBXScriptConnection?
 	}, Applied)
@@ -151,6 +158,9 @@ end
 --[=[
 	Runs your `Destroy` method, destroys the Janitor, and clears the attached
 	data of an AppliedObject.
+
+	This also runs on an object whose `Init` errored, so your `Destroy` method
+	should tolerate a partially initialized object.
 
 	Prefer [ClassyObject:Revoke] over calling this yourself, since `Revoke` also
 	handles the registry, the tag, and the `InstanceRevoked` signal.
@@ -206,15 +216,33 @@ Classy.__index = Classy
 	@prop InstanceAdded Signal<Instance, AppliedObject<T>>
 	@within ClassyObject
 
-	Fires when an instance is applied. Only fires for instances applied from now
-	on. Use [ClassyObject:ObserveApplied] to also cover existing ones.
+	Fires once an instance is applied and its `Init` has finished, so the object
+	it passes already has `Initialized` set to `true`. Only fires for instances
+	applied from now on. Use [ClassyObject:ObserveApplied] to also cover existing
+	ones.
+
+	It doesn't fire if `Init` errors or the instance is revoked before `Init`
+	finishes.
 ]=]
 
 --[=[
 	@prop InstanceRevoked Signal<Instance>
 	@within ClassyObject
 
-	Fires after an instance is revoked.
+	Fires after an instance is revoked. A revoke can interrupt `Init` or follow an
+	`Init` error, so this can fire for an object that never fired `InstanceAdded`.
+	It doesn't fire when a revoke cancels an apply that is still in its
+	constructor, since nothing was registered.
+]=]
+
+--[=[
+	@prop Pending { [Instance]: PendingApply }
+	@within ClassyObject
+	@private
+
+	Instances whose constructor is still running. Lets a concurrent
+	[ClassyObject:Apply] wait for the same object, and lets [ClassyObject:Revoke]
+	cancel it.
 ]=]
 
 --[=[
@@ -244,6 +272,7 @@ export type Classy<T> = typeof(setmetatable(
 			Init: string,
 			Destroy: string,
 		},
+		AutoInit: boolean,
 		WaitForMetadata: boolean,
 		Context: { any },
 		RemoveTagOnCleanup: boolean,
@@ -251,6 +280,7 @@ export type Classy<T> = typeof(setmetatable(
 		ConstructorKind: Types.ConstructorKind,
 		Predicate: ((Instance) -> boolean)?,
 		Applied: { [Instance]: Applied<T> },
+		Pending: {[Instance]: PendingApply},
 		InstanceAdded: Types.Signal<Instance, Applied<T>>,
 		InstanceRevoked: Types.Signal<Instance>,
 	},
@@ -283,6 +313,7 @@ function Classy.new<T>(Tag: string, Constructable: any, ConstructorKind: Constru
 		Predicate = Config.Predicate,
 		RemoveTagOnCleanup = if Config.RemoveTagOnCleanup ~= nil then Config.RemoveTagOnCleanup else true,
 		Nuke = if Config.Nuke ~= nil then Config.Nuke else true,
+		AutoInit = if Config.AutoInit ~= nil then Config.AutoInit else true,
 
 		NamingConvention = {
 			Init = Config.NamingConvention and Config.NamingConvention.Init or "Init",
@@ -293,8 +324,9 @@ function Classy.new<T>(Tag: string, Constructable: any, ConstructorKind: Constru
 		Context = Config.Context or {},
 
 		Applied = {},
+		Pending = {},
 		Janitor = Janitor.new(),
-
+		
 		InstanceAdded = Signal.new(),
 		InstanceRevoked = Signal.new(),
 	}, Classy)
@@ -356,11 +388,14 @@ end
 --[=[
 	Returns the applied object for an instance, if it has one.
 
+	The object can still be running its `Init`. Check its `Initialized` property
+	if that matters.
+
 	@within ClassyObject
 	@param Instance Instance
 	@return AppliedObject<T>?
 ]=]
-function Classy.GetApplied<T>(self: Classy<T>, Instance: Instance): Applied<T>
+function Classy.GetApplied<T>(self: Classy<T>, Instance: Instance): Applied<T>?
 	return self.Applied[Instance]
 end
 
@@ -376,56 +411,138 @@ end
 
 --[=[
 	Bypasses the [ClassyObject:CanBeApplied] check and applies an instance.
-	If the instance is already applied, the existing object is returned.
+
+	The steps run in this order: your constructor, registration, `Init`, then the
+	`InstanceAdded` signal. Because the object is registered before `Init` runs,
+	`Init` can find it with [Classy.getComponent] or [ClassyObject:GetApplied].
+
+	If the instance is already applied, the existing object is returned, even if
+	its `Init` is still running (check `Initialized`). If another call is currently
+	running the constructor for the same instance, this call waits and returns that
+	object. `Metadata` is ignored in both cases.
 
 	If `Metadata` is given, it's passed to your constructor as its fourth
 	argument and saved on the instance as a JSON attribute named
 	`_<lowercase tag>_metadata`. With `WaitForMetadata = true` and no metadata
 	passed, this waits up to 7 seconds for that attribute to exist.
 
+	Returns `nil` if the instance is revoked before the apply finishes, whether
+	that happens while your constructor or your `Init` is running.
+
+	:::warning Errors
+	If your constructor errors, Classy cleans up and rethrows the error. If `Init`
+	errors, Classy revokes the object (which runs your `Destroy` method and removes
+	the tag) and rethrows the error with a traceback.
+	:::
+
 ```lua
 	local AppliedObject = ClassyObject:Apply(SomeInstance)
-	AppliedObject:GetData():DoSomething()
+	if AppliedObject then
+		AppliedObject:GetData():DoSomething()
+	end
 ```
 
 	@within ClassyObject
 	@yields
 	@param Inst Instance
 	@param Metadata { [string]: any }? -- Must be JSON-serializable
-	@return AppliedObject<T>
+	@return AppliedObject<T>? -- `nil` if the instance was revoked before the apply finished
 ]=]
-function Classy.Apply<T>(self: Classy<T>, Inst: Instance, Metadata: { [string]: any }?): Applied<T>
+function Classy.Apply<T>(self: Classy<T>, Inst: Instance, Metadata: { [string]: any }?): Applied<T>?
 	if self.WaitForMetadata and not Metadata then
 		Metadata = Util.WaitForMetadata(Inst, self.Tag, METADATA_TIMEOUT)
 	end
 
-	if Metadata then
-		Inst:SetAttribute(`_{string.lower(self.Tag)}_metadata`, HttpService:JSONEncode(Metadata))
-	end
-
-	local Existing = self:GetApplied(Inst)
+	local Existing = self.Applied[Inst]
 	if Existing then
 		return Existing
 	end
 
-	if self.Logging then
-		print(`[Classy] Applied instance: {Inst:GetFullName()}`)
+	local InFlight = self.Pending[Inst]
+	if InFlight then
+		table.insert(InFlight.Waiting, coroutine.running())
+		coroutine.yield()
+		return self.Applied[Inst] -- nil if the apply was cancelled or failed
 	end
 
-	local AppliedObject = Applied.new(Inst, self, Metadata)
+	local PendingMap = self.Pending
+	local Pending: PendingApply = { Waiting = {}, Cancelled = false }
+	PendingMap[Inst] = Pending
+
+	if Metadata then
+		Inst:SetAttribute(`_{string.lower(self.Tag)}_metadata`, HttpService:JSONEncode(Metadata))
+	end
+	
+	if self.Logging then
+		print(`[Classy:{self.Tag}] Applied instance: {Inst:GetFullName()}`)
+	end
+
+	local Success, Result = pcall(Applied.new, Inst, self, Metadata)
+	PendingMap[Inst] = nil
+
+	local function WakeWaiters()
+		for _, Thread in Pending.Waiting do
+			task.spawn(Thread)
+		end
+	end
+
+	if not Success then
+		self.Janitor:Remove(Inst) -- Applied.new already added the janitor before it threw
+		WakeWaiters()
+		error(Result, 0)
+	end
+
+	local AppliedObject = Result :: Applied<T>
+
+	if Pending.Cancelled then
+		if self.Logging then
+			print(`[Classy:{self.Tag}] Cancelled apply for {Inst:GetFullName()} (revoked during constructor)`)
+		end
+
+		-- Revoked while the constructor was yielding
+		AppliedObject:Destroy()
+		WakeWaiters()
+		return nil
+	end
+
 	self.Applied[Inst] = AppliedObject
 
 	Registry.InstanceRegistry[Inst] = Registry.InstanceRegistry[Inst] or {}
 	Registry.InstanceRegistry[Inst][self.Tag] = AppliedObject
 
 	AppliedObject.AncestryConnection = Inst.AncestryChanged:Connect(function()
-	if not self:CanBeApplied(Inst) then
-		self:Revoke(Inst)
-	end
-end)
+		if not self:CanBeApplied(Inst) then
+			self:Revoke(Inst)
+		end
+	end)
 
+	WakeWaiters()
+
+	if self.AutoInit then
+		local InitSuccess, InitError = (xpcall :: any)(Util.SafeCall, debug.traceback, AppliedObject.Data, self.NamingConvention.Init, AppliedObject.Data)
+		local StillApplied = self.Applied[Inst] == AppliedObject
+
+		if not InitSuccess then
+			if StillApplied then
+				self:Revoke(Inst)
+				error(`[Classy] Init failed for "{self.Tag}" on {Inst:GetFullName()}:\n{InitError}`, 0)
+			end
+
+			-- Revoked mid-Init, so the object may have been cleared under it
+			if self.Logging then
+				warn(`[Classy] Init errored after "{self.Tag}" was revoked from {Inst:GetFullName()}:\n{InitError}`)
+			end
+			return nil
+		end
+
+		if not StillApplied then
+			return nil
+		end
+	end
+
+	AppliedObject.Initialized = true
 	self.InstanceAdded:Fire(Inst, AppliedObject)
-	
+
 	return AppliedObject
 end
 
@@ -433,6 +550,11 @@ end
 	Revokes an instance from Classy. Destroys its applied object, removes it from
 	the registry, removes the tag (unless `RemoveTagOnCleanup` is `false`), and
 	fires `InstanceRevoked`.
+
+	If the instance's constructor is still running, the apply is cancelled
+	instead: nothing is registered, the finished object is destroyed, the tag is
+	left alone, and `InstanceRevoked` doesn't fire. If its `Init` is running, it is
+	revoked normally.
 
 	:::info Note
 	This will nullify the object's metatable, so you will not be able to use its
@@ -449,7 +571,12 @@ end
 	@param Inst Instance
 ]=]
 function Classy.Revoke<T>(self: Classy<T>, Inst: Instance)
-	
+	local InFlight = self.Pending[Inst]
+	if InFlight then
+		InFlight.Cancelled = true
+		return
+	end
+
 	local AppliedObject = self:GetApplied(Inst)
 	if not AppliedObject then
 		return
@@ -466,7 +593,7 @@ function Classy.Revoke<T>(self: Classy<T>, Inst: Instance)
 	end
 
 	if self.Logging then
-		print(`[Classy] Revoked instance: {Inst:GetFullName()}`)
+		print(`[Classy:{self.Tag}] Revoked instance: {Inst:GetFullName()}`)
 	end
 
 	AppliedObject:Destroy()
@@ -482,6 +609,10 @@ end
 --[=[
 	Runs a callback for every already-applied object, and hooks into the
 	`InstanceAdded` signal so it also runs for every future one.
+
+	Objects whose `Init` is still running are skipped in the first pass and
+	delivered through `InstanceAdded` once they finish, so the callback sees each
+	object once, already initialized.
 
 ```lua
 	local Connection = ClassyObject:ObserveApplied(function(Instance, Applied)
@@ -500,7 +631,15 @@ function Classy.ObserveApplied<T>(
 	self: Classy<T>,
 	Callback: (Instance: Instance, Applied: Applied<T>) -> ()
 ): Types.Connection
-	for Inst, AppliedObject in self:GetAll() do
+
+	-- iterating a snapshot
+	for Inst, AppliedObject in table.clone(self.Applied) do
+		
+		-- will arrive later through InstanceAdded
+		if not AppliedObject.Initialized then
+			continue	
+		end
+
 		task.spawn(function()
 			Callback(Inst, AppliedObject :: Applied<T>)
 		end)
@@ -513,6 +652,11 @@ end
 	Destroys all tracked objects, cleans the Janitor, and destroys the signals,
 	rendering this object unusable. Also clears its global registration if it was
 	registered under its tag.
+
+	:::caution
+	Don't destroy a ClassyObject while one of its instances is still inside its
+	constructor. That apply can't finish cleanly once the ClassyObject is cleared.
+	:::
 
 	:::warning Metatable Removal
 	Running this will make any further attempts to call a method of ClassyObject
@@ -531,7 +675,7 @@ function Classy.Destroy<T>(self: Classy<T>)
 	end
 
 	if self.Logging then
-		print(`[Classy] Cleaned classy for: {self.Tag}`)
+		print(`[Classy:{self.Tag}] Cleaned up classy`)
 	end
 
 	self.Janitor:Destroy()

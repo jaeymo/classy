@@ -52,6 +52,7 @@ function Alias.ResolveClassyForTag(Tag: string, Metadata: { [string]: any }?): a
 		RemoveTagOnCleanup = BaseClassy.RemoveTagOnCleanup,
 		Logging = BaseClassy.Logging,
 		Ancestors = BaseClassy.Ancestors,
+		AutoInit = BaseClassy.AutoInit,
 		WaitForMetadata = BaseClassy.WaitForMetadata,
 	} :: any)
 	AliasClassy:Init()

@@ -66,7 +66,7 @@ export type Static = {
 ```
 ]=]
 local Classy = {
-	Version = "2.1.4",
+	Version = "2.2.0",
 	ClassName = "Classy",
 	ClassyObject = ClassyObject.ClassyObject,
 	AppliedObject = ClassyObject.AppliedObject,	
@@ -183,6 +183,9 @@ end
 
 --[=[
 	Gets the component applied to an instance under a tag.
+
+	The component can still be running its `Init`. Check its `Initialized`
+	property if you need it finished.
 
 ```lua
 	local killPart = Classy.getComponent(workspace.Lava, "KillPart")

@@ -13,14 +13,14 @@ Make composition **and** OOP architecture feel good in Roblox.
 </p>
 
 <p>
-  <img alt="Version" src="https://img.shields.io/badge/version-2.1.5-blue?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-2.2.0-blue?style=flat-square">
   <a href="https://github.com/jaeymo/classy/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/jaeymo/classy?style=flat-square&color=gold"></a>
   <a href="https://github.com/jaeymo/classy/issues"><img alt="Issues" src="https://img.shields.io/github/issues/jaeymo/classy?style=flat-square"></a>
   <a href="https://github.com/jaeymo/classy/commits/main"><img alt="Last commit" src="https://img.shields.io/github/last-commit/jaeymo/classy?style=flat-square"></a>
   <img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square">
 </p>
 
-[**Quick Start**](#-quick-start) · [**Examples**](#-examples) · [**Settings**](#%EF%B8%8F-settings) · [**API**](#-api) · [**Contributing**](#-contributing)
+[**Quick Start**](#-quick-start) · [**Examples**](#-examples) · [**Settings**](#%EF%B8%8F-settings) · [**Lifecycle**](#-lifecycle) · [**API**](#-api) · [**Contributing**](#-contributing)
 
 </div>
 
@@ -78,7 +78,7 @@ Add Classy to your `wally.toml`:
 
 ```toml
 [dependencies]
-Classy = "jaeymo/classy@2.1.5"
+Classy = "jaeymo/classy@2.2.0"
 ```
 
 Then run:
@@ -87,7 +87,7 @@ Then run:
 wally install
 ```
 
-Or grab it from the [Wally package page](https://wally.run/package/jaeymo/classy?version=2.1.5).
+Or grab it from the [Wally package page](https://wally.run/package/jaeymo/classy?version=2.2.0).
 
 </details>
 
@@ -207,6 +207,7 @@ Both `Classy.new` and `Classy.newClass` accept an optional `Config` table (`Clas
 | `NamingConvention` | `{ Init: string, Destroy: string }` | `{ Init = "Init", Destroy = "Destroy" }` | Method names Classy calls on your object for its lifecycle |
 | `WaitForMetadata` | `boolean` | `false` | Waits up to 7 seconds for an instance's [metadata attribute](#metadata) before applying it |
 | `Context` | `{ any }` | `{}` | Table handed to your constructor as its third argument |
+| `AutoInit` | `boolean` | `true` | Calls your object's `Init` method automatically after it is registered. When `false`, call it yourself. `Initialized` is then `true` as soon as the object is registered |
 
 ```lua
 Classy.newClass("Door", DoorClass, {
@@ -222,10 +223,38 @@ Classy.newClass("Door", DoorClass, {
 ```
 
 > [!NOTE]
-> **Lifecycle methods are automatic.** After your object is constructed, Classy calls its `Init` method (if it has one), and calls `Destroy` when the instance is revoked. Rename them with `NamingConvention`. `Init` runs *before* the object is registered, so inside `Init` the object can't yet be found with `getComponent` or `GetApplied`. Use `ObserveApplied` for that.
+> **Lifecycle methods are automatic.** After your object is constructed and registered, Classy calls its `Init` method (if it has one), and calls `Destroy` when the instance is revoked. Rename them with `NamingConvention`. Because the object is registered first, `Init` can find its own object with `getComponent` or `GetApplied`. See [Lifecycle](#-lifecycle) for the full order and what happens on failure.
 
 > [!NOTE]
 > **When checks run.** `ClassNames`, `Ancestors`, and `Predicate` are checked when an instance gets the tag (or joins the game with it) and again whenever an applied instance's ancestry changes. An instance that stops passing is revoked, and it is **not** re-applied automatically if it passes again later. Re-tag it or call `:Apply` yourself.
+
+## 🔄 Lifecycle
+
+Applying an instance (from its tag, `:Apply`, or `applyComponents`) runs these steps in order:
+
+1. **Construct**: your function, or your class's `new`, runs.
+2. **Register**: the object becomes available through `GetApplied`, `GetAll`, and `getComponent`.
+3. **Init**: your `Init` method runs (skipped if `AutoInit = false` or the method doesn't exist).
+4. **Initialized**: `Initialized` becomes `true` and `InstanceAdded` fires.
+
+Your constructor and `Init` are allowed to yield. Classy handles the cases that creates:
+
+| Situation | What happens |
+|---|---|
+| `:Apply` called again while the constructor is running | The second call waits and returns the same object |
+| `:Apply` called again while `Init` is running | Returns the existing object. Check `.Initialized` if you need it finished |
+| Revoked while the constructor is running | The apply is cancelled and the finished object is destroyed. `:Apply` returns `nil` |
+| Revoked while `Init` is running | Revoked normally. `:Apply` returns `nil` |
+| Constructor errors | Classy cleans up and rethrows the error |
+| `Init` errors | The object is revoked (your `Destroy` runs, the tag is removed) and the error is rethrown with a traceback |
+
+`ObserveApplied` only hands you initialized objects. Ones still in `Init` arrive through `InstanceAdded` when they finish.
+
+> [!NOTE]
+> If the instance is revoked while `Init` is running and `Init` then errors, the error is not rethrown and `:Apply` returns `nil`. The error is only logged as a warning when `Logging` is on.
+
+> [!TIP]
+> Since `Destroy` also runs after a failed `Init`, write it so it tolerates a half-built object.
 
 ## 📚 API
 
@@ -289,6 +318,9 @@ Classy.applyComponents(workspace.Lava, {
 Classy.emit(workspace.Lava, "Activated", { Source = "Lever" })
 ```
 
+> [!NOTE]
+> `getComponent` and `GetApplied` can return an object whose `Init` is still running. Check `.Initialized` if you need it finished.
+
 #### Triggers
 
 A component can declare triggers in its metadata under `Triggers`, mapping a trigger name to one of its methods. `Classy.emit` then calls that method with the context you pass:
@@ -326,7 +358,7 @@ Classy.applyComponents(player, {
 })
 ```
 
-The alias reuses the base's constructor and config (`ClassNames`, `Ancestors`, `Predicate`, `NamingConvention`, `Logging`, `RemoveTagOnCleanup`, `Nuke`, `WaitForMetadata`) and gets its own tag. Its `Context` is a copy of the base's with `tag` set to the alias tag. If the base isn't registered, Classy warns and skips the component.
+The alias reuses the base's constructor and config (`ClassNames`, `AutoInit`, `Ancestors`, `Predicate`, `NamingConvention`, `Logging`, `RemoveTagOnCleanup`, `Nuke`, `WaitForMetadata`) and gets its own tag. Its `Context` is a copy of the base's with `tag` set to the alias tag. If the base isn't registered, Classy warns and skips the component.
 
 #### Metadata
 
@@ -347,14 +379,21 @@ What `Classy.new` and `Classy.newClass` return.
 |---|---|---|
 | `:Init()` | | Applies all currently tagged instances that pass the checks and starts listening for new and removed ones. Call it once |
 | `:CanBeApplied(Inst)` | `boolean` | Whether `Inst` passes `ClassNames`, `Ancestors`, and `Predicate` |
-| `:Apply(Inst, Metadata?)` | `Applied<T>` | Applies `Inst`, bypassing `CanBeApplied`. Returns the existing one if already applied |
-| `:Revoke(Inst)` | | Destroys the applied object, removes it from Classy, and removes the tag (unless `RemoveTagOnCleanup = false`) |
+| `:Apply(Inst, Metadata?)` | `Applied<T>?` | Applies `Inst`, bypassing `CanBeApplied`. Returns the existing one if already applied, and waits if another call is mid-construction. Returns `nil` if the instance is revoked before it finishes. Errors from your constructor or `Init` are rethrown |
+| `:Revoke(Inst)` | | Destroys the applied object, removes it from Classy, and removes the tag (unless `RemoveTagOnCleanup = false`). Cancels the apply instead if the constructor is still running |
+| `:ObserveApplied(Callback)` | `Connection` | Runs `Callback(Instance, Applied)` for every existing initialized object **and** every future one |
+| `.InstanceAdded` | `Signal<Instance, Applied<T>>` | Fires once an instance is applied and its `Init` has finished |
+| `.InstanceRevoked` | `Signal<Instance>` | Fires after an instance is revoked. Can fire for an object that never fired `InstanceAdded` (revoked during, or after a failed, `Init`) |
 | `:GetApplied(Inst)` | `Applied<T>?` | Get the applied object for `Inst`, if any |
 | `:GetAll()` | `{ [Instance]: Applied<T> }` | Every applied object |
-| `:ObserveApplied(Callback)` | `Connection` | Runs `Callback(Instance, Applied)` for every existing applied object **and** every future one |
 | `:Destroy()` | | Revokes everything, cleans up its Janitor and signals, and makes the Classy unusable |
-| `.InstanceAdded` | `Signal<Instance, Applied<T>>` | Fires when an instance is applied |
-| `.InstanceRevoked` | `Signal<Instance>` | Fires after an instance is revoked |
+
+```lua
+local applied = KillPartClassy:Apply(workspace.Lava)
+if applied then
+	applied:GetData():DoSomething()
+end
+```
 
 ```lua
 local connection = KillPartClassy:ObserveApplied(function(instance, applied)
@@ -366,7 +405,7 @@ connection:Disconnect()
 ```
 
 > [!WARNING]
-> Revoking clears the `Applied` wrapper, and `Classy:Destroy()` clears the Classy, so don't use either afterwards. With `Nuke = true` (the default), revoking also clears your object's table and removes its metatable. Set `Nuke = false` if you need your object to stay intact after it's revoked.
+> Revoking clears the `Applied` wrapper, and `Classy:Destroy()` clears the Classy, so don't use either afterwards. With `Nuke = true` (the default), revoking also clears your object's table and removes its metatable. Set `Nuke = false` if you need your object to stay intact after it's revoked. Don't call `Classy:Destroy()` while an instance is still inside its constructor.
 
 ### Applied objects
 
@@ -381,6 +420,7 @@ The wrapper Classy keeps for each instance.
 | `.Janitor` | The Janitor handed to your constructor |
 | `.Data` | Same as `:GetData()` |
 | `.Triggers` | The trigger map from its metadata, if any |
+| `.Initialized` | `true` once `Init` has finished. Always `true` when `AutoInit = false` |
 
 ## 🤝 Contributing
 
