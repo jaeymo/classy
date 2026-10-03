@@ -472,9 +472,9 @@ function Classy.Apply<T>(self: Classy<T>, Inst: Instance, Metadata: { [string]: 
 	if Metadata then
 		Inst:SetAttribute(`_{string.lower(self.Tag)}_metadata`, HttpService:JSONEncode(Metadata))
 	end
-
+	
 	if self.Logging then
-		print(`[Classy] Applied instance: {Inst:GetFullName()}`)
+		print(`[Classy:{self.Tag}] Applied instance: {Inst:GetFullName()}`)
 	end
 
 	local Success, Result = pcall(Applied.new, Inst, self, Metadata)
@@ -495,6 +495,10 @@ function Classy.Apply<T>(self: Classy<T>, Inst: Instance, Metadata: { [string]: 
 	local AppliedObject = Result :: Applied<T>
 
 	if Pending.Cancelled then
+		if self.Logging then
+			print(`[Classy:{self.Tag}] Cancelled apply for {Inst:GetFullName()} (revoked during constructor)`)
+		end
+
 		-- Revoked while the constructor was yielding
 		AppliedObject:Destroy()
 		WakeWaiters()
@@ -589,7 +593,7 @@ function Classy.Revoke<T>(self: Classy<T>, Inst: Instance)
 	end
 
 	if self.Logging then
-		print(`[Classy] Revoked instance: {Inst:GetFullName()}`)
+		print(`[Classy:{self.Tag}] Revoked instance: {Inst:GetFullName()}`)
 	end
 
 	AppliedObject:Destroy()
@@ -671,7 +675,7 @@ function Classy.Destroy<T>(self: Classy<T>)
 	end
 
 	if self.Logging then
-		print(`[Classy] Cleaned classy for: {self.Tag}`)
+		print(`[Classy:{self.Tag}] Cleaned up classy`)
 	end
 
 	self.Janitor:Destroy()
